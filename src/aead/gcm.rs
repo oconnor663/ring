@@ -18,6 +18,7 @@ use crate::cpu;
 #[cfg(not(target_arch = "aarch64"))]
 mod gcm_nohw;
 
+#[derive(Clone)]
 pub struct Key(HTable);
 
 impl Key {

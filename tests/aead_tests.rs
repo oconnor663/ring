@@ -427,6 +427,39 @@ fn test_aead_key_debug() {
     );
 }
 
+#[test]
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+fn test_aead_lesssafekey_clone() {
+    let key_bytes = [0; 32];
+    let nonce = [0; aead::NONCE_LEN];
+
+    let key1: aead::LessSafeKey = aead::UnboundKey::new(&aead::AES_256_GCM, &key_bytes)
+        .unwrap()
+        .into();
+    let key2 = key1.clone();
+
+    // LessSafeKey doesn't support AsRef or PartialEq, so instead just check that both keys produce
+    // the same encrypted output.
+    let mut buf1 = [0; 32];
+    let tag1 = key1
+        .seal_in_place_separate_tag(
+            aead::Nonce::try_assume_unique_for_key(&nonce).unwrap(),
+            aead::Aad::empty(),
+            &mut buf1,
+        )
+        .unwrap();
+    let mut buf2 = [0; 32];
+    let tag2 = key2
+        .seal_in_place_separate_tag(
+            aead::Nonce::try_assume_unique_for_key(&nonce).unwrap(),
+            aead::Aad::empty(),
+            &mut buf2,
+        )
+        .unwrap();
+    assert_eq!(tag1.as_ref(), tag2.as_ref());
+    assert_eq!(buf1, buf2);
+}
+
 fn make_key<K: aead::BoundKey<OneNonceSequence>>(
     algorithm: &'static aead::Algorithm,
     key: &[u8],
