@@ -439,7 +439,7 @@ fn make_key<K: aead::BoundKey<OneNonceSequence>>(
 
 fn make_less_safe_key(algorithm: &'static aead::Algorithm, key: &[u8]) -> aead::LessSafeKey {
     let key = aead::UnboundKey::new(algorithm, key).unwrap();
-    aead::LessSafeKey::new(key)
+    aead::LessSafeKey::from(key)
 }
 
 struct OneNonceSequence(Option<aead::Nonce>);

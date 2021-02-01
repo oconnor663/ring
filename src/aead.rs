@@ -66,21 +66,21 @@ pub trait BoundKey<N: NonceSequence>: core::fmt::Debug {
 /// Intentionally not `Clone` or `Copy` since cloning would allow duplication
 /// of the nonce sequence.
 pub struct OpeningKey<N: NonceSequence> {
-    key: UnboundKey,
+    key: LessSafeKey,
     nonce_sequence: N,
 }
 
 impl<N: NonceSequence> BoundKey<N> for OpeningKey<N> {
     fn new(key: UnboundKey, nonce_sequence: N) -> Self {
         Self {
-            key,
+            key: key.inner,
             nonce_sequence,
         }
     }
 
     #[inline]
     fn algorithm(&self) -> &'static Algorithm {
-        self.key.algorithm
+        self.key.algorithm()
     }
 }
 
@@ -169,8 +169,7 @@ impl<N: NonceSequence> OpeningKey<N> {
     where
         A: AsRef<[u8]>,
     {
-        open_within_(
-            &self.key,
+        self.key.open_within(
             self.nonce_sequence.advance()?,
             aad,
             in_out,
@@ -181,14 +180,14 @@ impl<N: NonceSequence> OpeningKey<N> {
 
 #[inline]
 fn open_within_<'in_out, A: AsRef<[u8]>>(
-    key: &UnboundKey,
+    key: &LessSafeKey,
     nonce: Nonce,
     Aad(aad): Aad<A>,
     in_out: &'in_out mut [u8],
     ciphertext_and_tag: RangeFrom<usize>,
 ) -> Result<&'in_out mut [u8], error::Unspecified> {
     fn open_within<'in_out>(
-        key: &UnboundKey,
+        key: &LessSafeKey,
         nonce: Nonce,
         aad: Aad<&[u8]>,
         in_out: &'in_out mut [u8],
@@ -241,21 +240,21 @@ fn open_within_<'in_out, A: AsRef<[u8]>>(
 /// Intentionally not `Clone` or `Copy` since cloning would allow duplication
 /// of the nonce sequence.
 pub struct SealingKey<N: NonceSequence> {
-    key: UnboundKey,
+    key: LessSafeKey,
     nonce_sequence: N,
 }
 
 impl<N: NonceSequence> BoundKey<N> for SealingKey<N> {
     fn new(key: UnboundKey, nonce_sequence: N) -> Self {
         Self {
-            key,
+            key: key.inner,
             nonce_sequence,
         }
     }
 
     #[inline]
     fn algorithm(&self) -> &'static Algorithm {
-        self.key.algorithm
+        self.key.algorithm()
     }
 }
 
@@ -326,8 +325,7 @@ impl<N: NonceSequence> SealingKey<N> {
     where
         A: AsRef<[u8]>,
     {
-        seal_in_place_separate_tag_(
-            &self.key,
+        self.key.seal_in_place_separate_tag(
             self.nonce_sequence.advance()?,
             Aad::from(aad.as_ref()),
             in_out,
@@ -337,12 +335,12 @@ impl<N: NonceSequence> SealingKey<N> {
 
 #[inline]
 fn seal_in_place_separate_tag_(
-    key: &UnboundKey,
+    key: &LessSafeKey,
     nonce: Nonce,
     aad: Aad<&[u8]>,
     in_out: &mut [u8],
 ) -> Result<Tag, error::Unspecified> {
-    check_per_nonce_max_bytes(key.algorithm, in_out.len())?;
+    check_per_nonce_max_bytes(key.algorithm(), in_out.len())?;
     Ok((key.algorithm.seal)(
         &key.inner,
         nonce,
@@ -385,15 +383,13 @@ impl Aad<[u8; 0]> {
 
 /// An AEAD key without a designated role or nonce sequence.
 pub struct UnboundKey {
-    inner: KeyInner,
-    algorithm: &'static Algorithm,
-    cpu_features: cpu::Features,
+    inner: LessSafeKey,
 }
 
 impl core::fmt::Debug for UnboundKey {
     fn fmt(&self, f: &mut core::fmt::Formatter) -> Result<(), core::fmt::Error> {
         f.debug_struct("UnboundKey")
-            .field("algorithm", &self.algorithm)
+            .field("algorithm", &self.algorithm())
             .finish()
     }
 }
@@ -408,22 +404,20 @@ impl UnboundKey {
     /// Constructs an `UnboundKey`.
     ///
     /// Fails if `key_bytes.len() != algorithm.key_len()`.
+    #[inline]
     pub fn new(
         algorithm: &'static Algorithm,
         key_bytes: &[u8],
     ) -> Result<Self, error::Unspecified> {
-        let cpu_features = cpu::features();
         Ok(Self {
-            inner: (algorithm.init)(key_bytes, cpu_features)?,
-            algorithm,
-            cpu_features,
+            inner: LessSafeKey::new(algorithm, key_bytes)?,
         })
     }
 
     /// The key's AEAD algorithm.
     #[inline]
     pub fn algorithm(&self) -> &'static Algorithm {
-        self.algorithm
+        self.inner.algorithm()
     }
 }
 
@@ -433,7 +427,16 @@ impl From<hkdf::Okm<'_, &'static Algorithm>> for UnboundKey {
         let key_bytes = &mut key_bytes[..okm.len().key_len];
         let algorithm = *okm.len();
         okm.fill(key_bytes).unwrap();
-        Self::new(algorithm, key_bytes).unwrap()
+        Self {
+            inner: LessSafeKey::new(algorithm, key_bytes).unwrap(),
+        }
+    }
+}
+
+impl From<UnboundKey> for LessSafeKey {
+    #[inline]
+    fn from(key: UnboundKey) -> Self {
+        key.inner
     }
 }
 
@@ -449,13 +452,22 @@ impl hkdf::KeyType for &'static Algorithm {
 ///
 /// Prefer to use `OpeningKey`/`SealingKey` and `NonceSequence` when practical.
 pub struct LessSafeKey {
-    key: UnboundKey,
+    inner: KeyInner,
+    algorithm: &'static Algorithm,
+    cpu_features: cpu::Features,
 }
 
 impl LessSafeKey {
-    /// Constructs a `LessSafeKey` from an `UnboundKey`.
-    pub fn new(key: UnboundKey) -> Self {
-        Self { key }
+    /// Constructs an `LessSafeKey`.
+    ///
+    /// Fails if `key_bytes.len() != algorithm.key_len()`.
+    fn new(algorithm: &'static Algorithm, key_bytes: &[u8]) -> Result<Self, error::Unspecified> {
+        let cpu_features = cpu::features();
+        Ok(Self {
+            inner: (algorithm.init)(key_bytes, cpu_features)?,
+            algorithm,
+            cpu_features,
+        })
     }
 
     /// Like [`OpeningKey::open_in_place()`], except it accepts an arbitrary nonce.
@@ -488,7 +500,7 @@ impl LessSafeKey {
     where
         A: AsRef<[u8]>,
     {
-        open_within_(&self.key, nonce, aad, in_out, ciphertext_and_tag)
+        open_within_(&self, nonce, aad, in_out, ciphertext_and_tag)
     }
 
     /// Deprecated. Renamed to `seal_in_place_append_tag()`.
@@ -540,13 +552,13 @@ impl LessSafeKey {
     where
         A: AsRef<[u8]>,
     {
-        seal_in_place_separate_tag_(&self.key, nonce, Aad::from(aad.as_ref()), in_out)
+        seal_in_place_separate_tag_(&self, nonce, Aad::from(aad.as_ref()), in_out)
     }
 
     /// The key's AEAD algorithm.
     #[inline]
     pub fn algorithm(&self) -> &'static Algorithm {
-        &self.key.algorithm
+        &self.algorithm
     }
 }
 
